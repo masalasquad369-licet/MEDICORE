@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MedicoRe - Multimodal AI Assistant (Fixed)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+        #chat-box::-webkit-scrollbar { width: 8px; }
+        #chat-box::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 4px; }
+        .user-message {
+            background-color: #e0f2fe;
+            border-radius: 12px 12px 0 12px;
+            padding: 8px 12px;
+            margin-left: auto;
+            max-width: 80%;
+            margin-bottom: 8px;
+            word-break: break-word;
+        }
+        .ai-message {
+            background-color: #f0fdf4;
+            border-radius: 12px 12px 12px 0;
+            padding: 8px 12px;
+            max-width: 80%;
+            margin-bottom: 8px;
+            word-break: break-word;
+        }
+        .result-disease { font-weight: 700; color: #ef4444; font-size: 1.1em; }
+        /* Make the map and chat stack on small screens */
+        @media (max-width: 767px) {
+            .main-container { flex-direction: column; }
+            .chat-section, .map-section { width: 100% !important; border-left: none !important; }
+            #map { min-height: 300px; }
+        }
+    </style>
+</head>
+<body class="flex flex-col h-screen bg-gray-50">
+    <header class="bg-blue-600 text-white p-4 text-center shadow-lg">
+        <h1 class="text-2xl md:text-3xl font-bold">MedicoRe Multimodal AI</h1>
+        <p class="text-xs md:text-sm">Diagnose Disease from Image + Symptoms — AI suggestion only</p>
+    </header>
+
+    <div class="main-container flex flex-1 overflow-hidden md:flex-row flex-col">
+        <main class="chat-section flex flex-col p-4 w-full md:w-1/2">
+            <div id="chat-box" class="chat-box flex-1 border border-gray-300 rounded-xl p-4 overflow-y-auto bg-white mb-4 shadow-inner" role="log" aria-live="polite">
+                <div class="ai-message"><strong>MedicoRe:</strong> Hello! Upload a medical image and describe the symptoms below to get a potential diagnosis.</div>
+            </div>
+
+            <div class="input-section flex flex-col sm:flex-row gap-3">
+                <label class="w-full sm:w-1/3">
+                    <input aria-label="Upload medical image" type="file" id="image-upload" accept="image/*" class="w-full p-2 border border-blue-300 rounded-lg text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" />
+                </label>
+                <input aria-label="Describe symptoms" type="text" id="user-input" placeholder="Type symptoms here (e.g., 'itchy rash on arm')..." class="flex-grow p-3 border border-gray-300 rounded-lg text-base focus:ring-blue-500 focus:border-blue-500" />
+                <button id="send-btn" class="p-3 bg-green-500 text-white font-semibold rounded-lg shadow-md hover:bg-green-600 transition duration-150" aria-live="polite">
+                    <span id="send-text">Analyze</span>
+                    <svg id="loading-spinner" class="animate-spin -ml-1 mr-3 h-5 w-5 text-white hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                    </svg>
+                </button>
+            </div>
+        </main>
+
+        <aside class="map-section flex flex-col w-full md:w-1/2 border-l border-gray-200">
+            <div class="map-search flex gap-2 p-4 bg-white border-b border-gray-200 shadow-sm">
+                <input aria-label="Map search" type="text" id="map-search-input" placeholder="Search for a hospital or location..." class="flex-1 p-2 border border-gray-300 rounded-lg text-sm focus:ring-blue-500 focus:border-blue-500" />
+                <button id="map-search-btn" class="p-2 bg-blue-500 text-white font-semibold rounded-lg shadow-md hover:bg-blue-600 transition duration-150">Search Map</button>
+            </div>
+            <div id="map" class="flex-1 min-h-[320px]"></div>
+        </aside>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- GLOBAL CONFIG (securely replace these at deploy time) ---
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // IMPORTANT: set your Gemini/API key securely at deploy time. Do NOT hardcode private keys in client-side code for production.
+        // For local testing you can set a string like: const /*removed*/ = 'your_test_key_here';
+        /* Frontend no longer contains API key. Backend handles Gemini API. */
+const BACKEND_ANALYZE_URL = 'http://localhost:5000/analyze';
+const DEFAULT_CITY_SEARCH = 'Chennai, India';
+const DEFAULT_COORDS = [13.0827, 80.2707];
+        // /*removed*/ removed: frontend will call backend at BACKEND_ANALYZE_URL
+        const MAX_RETRIES = 5;
+
+        // --- Firebase init ---
+        let app, db, auth;
+        async function initFirebase() {
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                if (initialAuthToken) {
+                    // signInWithCustomToken expects a valid token string
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                console.log('Firebase initialized, user:', auth.currentUser?.uid || 'anonymous');
+            } catch (err) {
+                console.warn('Firebase init failed (continuing without DB features):', err);
+            }
+        }
+
+        // --- Helpers ---
+        function fileToBase64(file) {
+            return new Promise((resolve, reject) => {
+                if (!file) return resolve(null);
+                const reader = new FileReader();
+                reader.onload = () => {
+                    const result = reader.result || '';
+                    // result is like "data:<mime>;base64,<data>"
+                    const comma = result.indexOf(',');
+                    resolve(comma >= 0 ? result.substring(comma + 1) : result);
+                };
+                reader.onerror = (e) => reject(e);
+                reader.readAsDataURL(file);
+            });
+        }
+
+        async function fetchWithRetry(url, options) {
+            for (let i = 0; i < MAX_RETRIES; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (response.status === 429 && i < MAX_RETRIES - 1) {
+                        const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
+                        await new Promise(r => setTimeout(r, delay));
+                        continue;
+                    }
+                    if (!response.ok) {
+                        const body = await response.text();
+                        if (response.status === 403) {
+                            throw new Error('API returned 403 — check your API key and permissions. Response: ' + body);
+                        }
+                        throw new Error(`HTTP ${response.status}: ${body}`);
+                    }
+                    return response;
+                } catch (err) {
+                    if (i === MAX_RETRIES - 1) throw err;
+                    console.warn('fetch attempt failed', i + 1, err);
+                }
+            }
+        }
+
+        // --- Main multimodal analysis ---
+        async function analyzeMultimodalInput(symptoms, base64Image) {
+            try {
+                const resp = await fetch(BACKEND_ANALYZE_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ symptoms, imageBase64: base64Image })
+                });
+                if (!resp.ok) {
+                    const txt = await resp.text();
+                    return { error: 'Backend error: ' + resp.status + ' - ' + txt };
+                }
+                const data = await resp.json();
+                if (data.error) return { error: data.error };
+                // data.result is a JSON string returned by the model; try to parse
+                try {
+                    const parsed = JSON.parse(data.result);
+                    return parsed;
+                } catch (e) {
+                    return { error: 'Unable to parse model JSON: ' + e.message + '. Raw response: ' + (data.result || '') };
+                }
+            } catch (err) {
+                return { error: 'Request failed: ' + err.message };
+            }
+        }
+
+        // --- UI & Map wiring ---
+        const chatBox = document.getElementById('chat-box');
+        const userInput = document.getElementById('user-input');
+        const imageUpload = document.getElementById('image-upload');
+        const sendBtn = document.getElementById('send-btn');
+        const loadingSpinner = document.getElementById('loading-spinner');
+        const sendText = document.getElementById('send-text');
+        let isProcessing = false;
+
+        function appendAIMessage(html) {
+            const div = document.createElement('div');
+            div.className = 'ai-message';
+            div.innerHTML = '<strong>MedicoRe:</strong> ' + html;
+            chatBox.appendChild(div);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        function appendUserMessage(text) {
+            const div = document.createElement('div');
+            div.className = 'user-message';
+            div.innerHTML = '<strong>You:</strong> ' + text;
+            chatBox.appendChild(div);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        function showLoading(show) {
+            isProcessing = show;
+            sendBtn.disabled = show;
+            if (show) {
+                loadingSpinner.classList.remove('hidden');
+                sendText.textContent = 'Analyzing...';
+                sendBtn.classList.remove('bg-green-500');
+                sendBtn.classList.add('bg-green-700');
+            } else {
+                loadingSpinner.classList.add('hidden');
+                sendText.textContent = 'Analyze';
+                sendBtn.classList.add('bg-green-500');
+                sendBtn.classList.remove('bg-green-700');
+            }
+        }
+
+        sendBtn.addEventListener('click', async () => {
+            if (isProcessing) return;
+
+            const message = (userInput.value || '').trim();
+            const imageFile = imageUpload.files?.[0] || null;
+
+            if (!message && !imageFile) {
+                appendAIMessage('Please provide symptoms in the text box and/or upload an image.');
+                return;
+            }
+
+            // Build user message (escape HTML minimally)
+            let userMsgParts = [];
+            if (imageFile) userMsgParts.push('Uploaded Image: <em>' + (imageFile.name.replace(/</g, '&lt;').replace(/>/g, '&gt;')) + '</em>');
+            if (message) userMsgParts.push('Text: ' + message.replace(/</g, '&lt;').replace(/>/g, '&gt;'));
+            appendUserMessage(userMsgParts.join(' &bull; '));
+
+            showLoading(true);
+            try {
+                const base64Image = await fileToBase64(imageFile);
+                const result = await analyzeMultimodalInput(message, base64Image);
+                showLoading(false);
+
+                if (result.error) {
+                    appendAIMessage('<span class="text-red-600">⚠️ Error:</span> ' + result.error);
+                } else {
+                    const diseaseName = result.disease_name || 'Unknown';
+                    const confidenceNum = Number(result.confidence_score) || 0;
+                    const confidence = (confidenceNum * 100).toFixed(2);
+
+                    if (diseaseName === 'Insufficient Data' || confidenceNum === 0) {
+                        appendAIMessage('**Analysis Failed:** The input was too vague. Please provide a clearer image and more detailed symptoms.');
+                        triggerMapSearch('General Physician near me');
+                    } else {
+                        appendAIMessage(`Classification Result:<br>Disease: <span class="result-disease">${diseaseName}</span><br>Confidence: ${confidence}%<br><br>⚠️ <strong>Disclaimer:</strong> This is an AI-generated suggestion and is not a substitute for professional medical advice. Consult a qualified doctor.`);
+                        triggerMapSearch(DEFAULT_CITY_SEARCH + ' hospitals');
+                    }
+                }
+            } catch (err) {
+                showLoading(false);
+                appendAIMessage('<span class="text-red-600">A major error occurred:</span> ' + (err.message || err));
+            } finally {
+                // Clear inputs
+                userInput.value = '';
+                imageUpload.value = '';
+            }
+        });
+
+        userInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendBtn.click();
+            }
+        });
+
+        // --- Leaflet map ---
+        const map = L.map('map').setView(DEFAULT_COORDS, 11);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        let currentMarkers = [];
+        function clearMarkers() {
+            currentMarkers.forEach(m => map.removeLayer(m));
+            currentMarkers = [];
+        }
+
+        function addMarker(lat, lon, popupHtml) {
+            const marker = L.marker([lat, lon]).addTo(map);
+            marker.bindPopup(popupHtml).openPopup();
+            currentMarkers.push(marker);
+        }
+
+        const mapSearchInput = document.getElementById('map-search-input');
+        const mapSearchBtn = document.getElementById('map-search-btn');
+
+        mapSearchBtn.addEventListener('click', () => {
+            const q = (mapSearchInput.value || '').trim();
+            if (q) triggerMapSearch(q);
+        });
+
+        mapSearchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                mapSearchBtn.click();
+            }
+        });
+
+        async function triggerMapSearch(query) {
+            if (!query) return;
+            appendAIMessage('Map updated with recommended search: <span class="font-semibold">' + query.replace(/</g,'&lt;') + '</span>');
+            // Use Nominatim for geocoding
+            clearMarkers();
+            try {
+                const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5`;
+                const resp = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+                if (!resp.ok) throw new Error('Geocoding failed: ' + resp.status);
+                const data = await resp.json();
+                if (!data || data.length === 0) {
+                    appendAIMessage('<span class="text-red-500"><strong>Map Error:</strong> Location not found for "' + query.replace(/</g, '&lt;') + '".</span>');
+                    return;
+                }
+                // Add up to 5 results
+                data.slice(0, 5).forEach((d, i) => {
+                    const lat = parseFloat(d.lat), lon = parseFloat(d.lon);
+                    addMarker(lat, lon, `<strong>Result ${i+1}</strong><br>${(d.display_name || '')}`);
+                    if (i === 0) map.setView([lat, lon], 13);
+                });
+            } catch (err) {
+                appendAIMessage('<span class="text-red-500"><strong>Map Error:</strong> ' + (err.message || err) + '</span>');
+            }
+        }
+
+        // Initialize firebase (non-blocking)
+        initFirebase();
+    </script>
+</body>
+</html>
